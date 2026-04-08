@@ -11,44 +11,25 @@ SHOP_LATITUDE = float(os.environ.get("SHOP_LATITUDE", "42.3417"))
 SHOP_NAME = os.environ.get("SHOP_NAME", "Наш магазин")
 
 
-def geocode_address(address: str):
+def geocode_address(address):
     url = "https://geocode-maps.yandex.ru/1.x/"
-    params = {
-        "apikey": YANDEX_GEOCODER_KEY,
-        "geocode": address,
-        "format": "json",
-        "results": 1,
-    }
+    params = {"apikey": YANDEX_GEOCODER_KEY, "geocode": address, "format": "json", "results": 1}
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
     try:
-        pos = (
-            data["response"]["GeoObjectCollection"]
-            ["featureMember"][0]["GeoObject"]
-            ["Point"]["pos"]
-        )
+        pos = data["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["Point"]["pos"]
         lon, lat = map(float, pos.split())
         return lon, lat
     except (KeyError, IndexError, ValueError):
         return None, None
 
 
-def get_delivery_price(client_lon: float, client_lat: float):
+def get_delivery_price(client_lon, client_lat):
     url = "https://b2b.taxi.yandex.net/b2b/cargo/integration/v2/check-price"
-    headers = {
-        "Authorization": f"Bearer {YANDEX_DELIVERY_TOKEN}",
-        "Content-Type": "application/json",
-        "Accept-Language": "ru",
-    }
+    headers = {"Authorization": f"Bearer {YANDEX_DELIVERY_TOKEN}", "Content-Type": "application/json", "Accept-Language": "ru"}
     body = {
-        "items": [
-            {
-                "size": {"length": 0.3, "width": 0.2, "height": 0.1},
-                "weight": 1.0,
-                "quantity": 1,
-            }
-        ],
+        "items": [{"size": {"length": 0.3, "width": 0.2, "height": 0.1}, "weight": 1.0, "quantity": 1}],
         "route_points": [
             {"coordinates": [SHOP_LONGITUDE, SHOP_LATITUDE], "type": "source"},
             {"coordinates": [client_lon, client_lat], "type": "destination"},
@@ -68,27 +49,14 @@ def get_delivery_price(client_lon: float, client_lat: float):
 def calculate_delivery():
     data = request.get_json(force=True, silent=True) or {}
     address = data.get("address", "").strip()
-
     if not address:
-        return jsonify({
-            "price": "не определена",
-            "message": "❌ Адрес не указан. Пожалуйста, введите адрес доставки."
-        })
-
+        return jsonify({"price": "не определена", "message": "❌ Адрес не указан."})
     lon, lat = geocode_address(address)
     if lon is None:
-        return jsonify({
-            "price": "не определена",
-            "message": "❌ Не удалось определить адрес. Уточните адрес и попробуйте снова."
-        })
-
+        return jsonify({"price": "не определена", "message": "❌ Не удалось определить адрес."})
     price, currency = get_delivery_price(lon, lat)
     if price is None:
-        return jsonify({
-            "price": "не определена",
-            "message": "❌ Не удалось рассчитать стоимость доставки. Попробуйте позже."
-        })
-
+        return jsonify({"price": "не определена", "message": "❌ Не удалось рассчитать стоимость."})
     message = f"🚚 Стоимость доставки по адресу {address}: {price} {currency}"
     return jsonify({"price": f"{price} {currency}", "message": message})
 
