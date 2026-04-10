@@ -1,64 +1,112 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import math
 
 app = Flask(__name__)
 
 YANDEX_GEOCODER_KEY = os.environ.get("YANDEX_GEOCODER_KEY", "")
-YANDEX_DELIVERY_TOKEN = os.environ.get("YANDEX_DELIVERY_TOKEN", "")
-SHOP_LONGITUDE = float(os.environ.get("SHOP_LONGITUDE", "69.5765"))
-SHOP_LATITUDE = float(os.environ.get("SHOP_LATITUDE", "42.3417"))
-SHOP_NAME = os.environ.get("SHOP_NAME", "Наш магазин")
+
+# Координаты магазина
+SHOP_LAT = 42.316541
+SHOP_LON = 69.634382
 
 
 def geocode_address(address):
+    """Получаем координаты адреса клиента"""
     url = "https://geocode-maps.yandex.ru/1.x/"
-    params = {"apikey": YANDEX_GEOCODER_KEY, "geocode": address, "format": "json", "results": 1}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        pos = data["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["Point"]["pos"]
-        lon, lat = map(float, pos.split())
-        return lon, lat
-    except (KeyError, IndexError, ValueError):
-        return None, None
-
-
-def get_delivery_price(client_lon, client_lat):
-    url = "https://b2b.taxi.yandex.net/b2b/cargo/integration/v2/check-price"
-    headers = {"Authorization": f"Bearer {YANDEX_DELIVERY_TOKEN}", "Content-Type": "application/json", "Accept-Language": "ru"}
-    body = {
-        "items": [{"size": {"length": 0.3, "width": 0.2, "height": 0.1}, "weight": 1.0, "quantity": 1}],
-        "route_points": [
-            {"coordinates": [SHOP_LONGITUDE, SHOP_LATITUDE], "type": "source"},
-            {"coordinates": [client_lon, client_lat], "type": "destination"},
-        ],
-        "fullname": SHOP_NAME,
+    params = {
+        "apikey": YANDEX_GEOCODER_KEY,
+        "geocode": f"Шымкент, {address}",
+        "format": "json",
+        "results": 1,
     }
-    resp = requests.post(url, json=body, headers=headers, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
     try:
-        return data["price"], data.get("currency", "RUB")
-    except KeyError:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        pos = (
+            data["response"]["GeoObjectCollection"]
+            ["featureMember"][0]["GeoObject"]
+            ["Point"]["pos"]
+        )
+        lon, lat = map(float, pos.split())
+        return lat, lon
+    except Exception:
         return None, None
+
+
+def calculate_distance_km(lat1, lon1, lat2, lon2):
+    """Считаем расстояние между двумя точками в км (формула Haversine)"""
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
+
+def calculate_delivery_price(distance_km):
+    """
+    Тариф доставки по Шымкенту:
+    - До 3 км: 700₸
+    - Свыше 3 км: 700₸ + 150₸ за каждый км сверх 3
+    - Максимум: 3000₸
+    """
+    if distance_km <= 3:
+        price = 700
+    else:
+        extra_km = distance_km - 3
+        price = 700 + (extra_km * 150)
+
+    price = min(round(price), 3000)
+    return price
 
 
 @app.route("/calculate-delivery", methods=["POST"])
 def calculate_delivery():
+    """
+    ManyChat External Request отправляет:
+      { "address": "ул. Абая 10" }
+    Возвращает:
+      { "price": "700 ₸", "distance": "2.3 км", "message": "..." }
+    """
     data = request.get_json(force=True, silent=True) or {}
     address = data.get("address", "").strip()
+
     if not address:
-        return jsonify({"price": "не определена", "message": "❌ Адрес не указан."})
-    lon, lat = geocode_address(address)
-    if lon is None:
-        return jsonify({"price": "не определена", "message": "❌ Не удалось определить адрес."})
-    price, currency = get_delivery_price(lon, lat)
-    if price is None:
-        return jsonify({"price": "не определена", "message": "❌ Не удалось рассчитать стоимость."})
-    message = f"🚚 Стоимость доставки по адресу {address}: {price} {currency}"
-    return jsonify({"price": f"{price} {currency}", "message": message})
+        return jsonify({
+            "price": "не определена",
+            "distance": "неизвестно",
+            "message": "❌ Адрес не указан. Пожалуйста, введите адрес доставки."
+        })
+
+    # Геокодируем адрес клиента
+    client_lat, client_lon = geocode_address(address)
+    if client_lat is None:
+        return jsonify({
+            "price": "не определена",
+            "distance": "неизвестно",
+            "message": "❌ Адрес не найден. Уточните адрес и попробуйте снова."
+        })
+
+    # Считаем расстояние
+    distance_km = calculate_distance_km(SHOP_LAT, SHOP_LON, client_lat, client_lon)
+
+    # Считаем цену
+    price = calculate_delivery_price(distance_km)
+
+    message = (
+        f"🚚 Доставка по адресу: {address}\n"
+        f"📍 Расстояние: {distance_km:.1f} км\n"
+        f"💰 Стоимость доставки: {price} ₸"
+    )
+
+    return jsonify({
+        "price": f"{price} ₸",
+        "distance": f"{distance_km:.1f} км",
+        "message": message
+    })
 
 
 @app.route("/health", methods=["GET"])
